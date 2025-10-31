@@ -1,0 +1,28 @@
+# Required packages for the Advanced PDF Chatbot
+
+# Core web framework
+fastapi==0.104.1
+uvicorn==0.24.0
+gunicorn==22.0.0
+python-multipart==0.0.6
+
+# HTTP requests and environment
+requests==2.31.0
+python-dotenv==1.0.0
+
+# PDF processing
+pypdf==5.9.0
+python-docx==1.1.2
+
+# Text processing and AI
+langchain-text-splitters==0.2.2
+langchain-core>=0.2.22
+langchain>=0.2.6
+langgraph==0.1.14
+
+# AI services
+openai==1.98.0
+pinecone-client==3.2.2
+
+# Dependencies (let pip resolve versions)
+pydantic>=2.5.0
