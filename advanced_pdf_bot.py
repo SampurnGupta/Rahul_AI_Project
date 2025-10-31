@@ -34,6 +34,11 @@ from dotenv import load_dotenv
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
+# Global constants
+EMBEDDING_MODEL = "text-embedding-3-small"
+LLM_MODEL = "gemini-2.5-flash"
+PINECONE_INDEX_NAME = "pdf-chatbot-index"
+EMBEDDING_DIMENSION = 1536  # Dimension for text-embedding-3-small
 
 def setup_logging(log_level: str = "INFO"):
     """
@@ -162,11 +167,6 @@ def genai_embeddings_create(inputs: List[str], model: str = EMBEDDING_MODEL) -> 
     except Exception as e:
         raise
 
-# Global constants
-EMBEDDING_MODEL = "text-embedding-3-small"
-LLM_MODEL = "gemini-2.5-flash"
-PINECONE_INDEX_NAME = "pdf-chatbot-index"
-EMBEDDING_DIMENSION = 1536  # Dimension for text-embedding-3-small
 
 # Speed/Token optimization flags
 ENABLE_DOC_SUMMARY = os.getenv("ENABLE_DOC_SUMMARY", "true").lower() == "true"
