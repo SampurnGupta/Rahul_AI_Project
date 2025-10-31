@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>PDF Chatbot</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body {
+            font-family: 'Inter', 'Segoe UI', Arial, sans-serif;
+            background: linear-gradient(120deg, #e0eafc 0%, #cfdef3 100%);
+            color: #23272f;
+            min-height: 100vh;
+            margin: 0;
+            padding: 0;
+        }
+        .container {
+            max-width: 500px;
+            margin: 38px auto;
+            background: #fff;
+            border-radius: 22px;
+            box-shadow: 0 8px 40px rgba(38, 77, 150, 0.09), 0 1.5px 6px rgba(38, 77, 150, 0.09);
+            padding: 34px 18px 24px 18px;
+            display: flex;
+            flex-direction: column;
+            gap: 18px;
+            animation: fadeIn 0.8s cubic-bezier(.6,.4,.2,1);
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(30px);}
+            to { opacity: 1; transform: none;}
+        }
+        h1 {
+            text-align: center;
+            font-size: 2.2rem;
+            font-weight: 700;
+            margin-bottom: 10px;
+            color: #2c387e;
+            letter-spacing: -1.5px;
+        }
+        .tab-bar {
+            display: flex;
+            margin-bottom: 0;
+            border-bottom: 1.5px solid #e7eaf3;
+        }
+        .tab {
+            flex: 1;
+            padding: 13px 0;
+            text-align: center;
+            cursor: pointer;
+            font-weight: 500;
+            color: #7b8190;
+            background: none;
+            border: none;
+            outline: none;
+            transition: color .18s;
+        }
+        .tab.active {
+            color: #2c387e;
+            border-bottom: 3px solid #2c387e;
+            background: linear-gradient(90deg,#e0eafc 0%, #fff 100%);
+        }
+        .upload-box {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            justify-content: center;
+            background: #f6f8fa;
+            border-radius: 8px;
+            padding: 18px 13px;
+            margin-bottom: 10px;
+            animation: fadeIn .9s cubic-bezier(.6,.4,.2,1);
+        }
+        .upload-box input[type=file] {
+            flex:1;
+            padding: 9px;
+            border-radius: 6px;
+            border: 1px solid #e1e4e8;
+            background: #fff;
+            font-size: .98rem;
+        }
+        .upload-btn, .switch-btn {
+            background: linear-gradient(90deg,#2c387e 0%, #5063d5 100%);
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            padding: 9px 23px;
+            font-size: 1.04rem;
+            font-weight: 600;
+            cursor: pointer;
+            box-shadow: 0 1.5px 6px rgba(38, 77, 150, 0.07);
+            transition: filter .16s, box-shadow .16s;
+        }
+        .upload-btn:hover, .switch-btn:hover { filter: brightness(1.08); box-shadow: 0 4px 12px rgba(38, 77, 150, 0.11);}
+        .upload-btn:active, .switch-btn:active { filter: brightness(0.93);}
+        .switch-btn {
+            margin: 0 auto;
+            margin-bottom: 10px;
+            display: block;
+            background: linear-gradient(90deg,#f6f8fa 0%, #e0eafc 100%);
+            color: #5063d5;
+            border: 1px solid #e1e4e8;
+            font-weight: 500;
+            box-shadow: none;
+        }
+        .switch-btn:active { filter: brightness(0.98);}
+        .summary-panel {
+            background: #f6f8fa;
+            border-radius: 10px;
+            padding: 18px 14px;
+            font-size: 1.07rem;
+            color: #26367c;
+            margin-top: 12px;
+            min-height: 60px;
+            animation: fadeInSummary .7s cubic-bezier(.6,.4,.2,1);
+            line-height: 1.6;
+            word-break: break-word;
+        }
+        @keyframes fadeInSummary {
+            from {opacity:0;transform:translateY(20px);}
+            to {opacity:1;transform:none;}
+        }
+        .chat-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+            margin-top: 8px;
+            min-height: 200px;
+            max-height: 270px;
+            overflow-y: auto;
+            animation: fadeIn .8s cubic-bezier(.6,.4,.2,1);
+            scroll-behavior: smooth;
+        }
+        .bubble-row {
+            display: flex;
+            gap: 7px;
+            align-items: flex-end;
+        }
+        .bubble {
+            max-width: 75%;
+            padding: 11px 17px;
+            font-size: 1.09rem;
+            border-radius: 16px;
+            box-shadow: 0 2px 8px rgba(38, 77, 150, 0.07);
+            margin-bottom: 2px;
+            animation: bubbleIn .38s cubic-bezier(.7,.6,.2,1);
+            word-break: break-word;
+            transition: transform .14s;
+        }
+        @keyframes bubbleIn {
+            from { opacity: 0; transform: scale(0.95);}
+            to { opacity: 1; transform: none;}
+        }
+        .bubble.user {
+            background: linear-gradient(90deg,#e0eafc 0%, #f6f8fa 100%);
+            color: #2c387e;
+            margin-left: auto;
+            border-bottom-right-radius: 4px;
+            border-top-right-radius: 18px;
+            border-top-left-radius: 18px;
+        }
+        .bubble.bot {
+            background: linear-gradient(90deg,#5063d5 0%, #2c387e 100%);
+            color: #fff;
+            margin-right: auto;
+            border-bottom-left-radius: 4px;
+            border-top-left-radius: 18px;
+            border-top-right-radius: 18px;
+        }
+        .avatar {
+            width: 34px; height: 34px;
+            border-radius: 50%;
+            background: #e0eafc;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.45rem;
+            font-weight: 600;
+            box-shadow: 0 2px 8px rgba(38, 77, 150, 0.04);
+            margin-bottom: 2px;
+            margin-left: 2px;
+            margin-right: 2px;
+            user-select: none;
+        }
+        .avatar.user { background: #e0eafc; color: #5063d5;}
+        .avatar.bot  { background: #5063d5; color: #fff;}
+        .chat-form {
+            display: flex;
+            gap: 9px;
+            margin-top: 8px;
+            align-items: flex-end;
+        }
+        .chat-form textarea {
+            flex: 1;
+            resize: none;
+            border-radius: 8px;
+            border: 1px solid #e1e4e8;
+            font-size: 1.08rem;
+            padding: 11px;
+            background: #fcfcfe;
+            transition: box-shadow .16s;
+            min-height: 38px;
+            max-height: 90px;
+            line-height: 1.45;
+        }
+        .chat-form textarea:focus { box-shadow: 0 0 5px rgba(80,99,213,.10);}
+        .send-btn {
+            background: linear-gradient(90deg,#2c387e 0%, #5063d5 100%);
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            padding: 0 16px;
+            font-size: 1.18rem;
+            font-weight: 600;
+            cursor: pointer;
+            box-shadow: 0 1.5px 6px rgba(38, 77, 150, 0.07);
+            transition: filter .16s;
+            min-height: 40px;
+        }
+        .send-btn:hover { filter: brightness(1.08);}
+        .send-btn:active { filter: brightness(0.93);}
+        .status-bar {
+            text-align: center;
+            font-size: .99rem;
+            color: #6b71a0;
+            margin-top: 2px;
+            margin-bottom: -2px;
+            min-height: 22px;
+            animation: fadeIn .7s cubic-bezier(.6,.2,.2,1);
+        }
+        .typing-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 1.08rem;
+            color: #5063d5;
+            margin-left: 8px;
+            margin-bottom: 4px;
+        }
+        .dots {
+            display: inline-block;
+            width: 22px;
+            height: 12px;
+        }
+        .dot {
+            display: inline-block;
+            width: 6px; height: 6px;
+            margin: 0 1px;
+            border-radius: 50%;
+            background: #5063d5;
+            opacity: 0.5;
+            animation: blink 1.2s infinite;
+        }
+        .dot:nth-child(2) { animation-delay: .2s; }
+        .dot:nth-child(3) { animation-delay: .4s; }
+        @keyframes blink {
+            0%, 80%, 100% { opacity: 0.5;}
+            40% { opacity: 1;}
+        }
+        @media (max-width: 620px) {
+            .container {max-width: 99vw; padding: 10px;}
+            h1 {font-size: 1.2rem;}
+            .bubble, .summary-panel {font-size: 1rem;}
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>PDF Chatbot</h1>
+        <div class="upload-box" id="upload-box">
+            <input type="file" id="pdf-file" accept=".pdf" />
+            <button class="upload-btn" id="upload-btn">Upload</button>
+        </div>
+        <button class="switch-btn" id="switch-btn" style="display:none;">Upload a new PDF</button>
+        <div class="tab-bar">
+            <button class="tab active" id="tab-chat">💬 Chat</button>
+            <button class="tab" id="tab-summary">📄 Summary</button>
+        </div>
+        <div class="status-bar" id="status"></div>
+        <div class="chat-panel" id="chat-panel"></div>
+        <form class="chat-form" id="chat-form" style="display:none;">
+            <textarea id="chat-input" rows="1" placeholder="Ask a question about your PDF…" autocomplete="off"></textarea>
+            <button type="submit" class="send-btn">Send</button>
+        </form>
+        <div class="summary-panel" id="summary-panel" style="display:none;"></div>
+    </div>
+    <script>
+        // UI State
+        let pdfUploaded = false, pdfFile = null, summary = "";
+        let chatHistory = [];
+        let botTyping = false;
+        const statusBar = document.getElementById('status');
+        const chatPanel = document.getElementById('chat-panel');
+        const chatForm = document.getElementById('chat-form');
+        const chatInput = document.getElementById('chat-input');
+        const summaryPanel = document.getElementById('summary-panel');
+        const tabChat = document.getElementById('tab-chat');
+        const tabSummary = document.getElementById('tab-summary');
+        const uploadBox = document.getElementById('upload-box');
+        const uploadBtn = document.getElementById('upload-btn');
+        const switchBtn = document.getElementById('switch-btn');
+        let scrollTimeout = null;
+
+        // Tab logic
+        function showTab(tab) {
+            if(tab==='chat') {
+                tabChat.classList.add('active');
+                tabSummary.classList.remove('active');
+                chatPanel.style.display = '';
+                chatForm.style.display = pdfUploaded ? '' : 'none';
+                summaryPanel.style.display = 'none';
+            } else {
+                tabChat.classList.remove('active');
+                tabSummary.classList.add('active');
+                chatPanel.style.display = 'none';
+                chatForm.style.display = 'none';
+                summaryPanel.style.display = '';
+            }
+        }
+        tabChat.onclick = () => showTab('chat');
+        tabSummary.onclick = () => showTab('summary');
+
+        // Upload PDF
+        uploadBtn.onclick = async function() {
+            const input = document.getElementById('pdf-file');
+            if(!input.files.length) { statusBar.textContent = "Select a PDF file first."; return; }
+            pdfFile = input.files[0];
+            statusBar.textContent = "Uploading PDF...";
+            uploadBtn.disabled = true;
+            uploadBtn.textContent = "Uploading...";
+            const fd = new FormData();
+            fd.append('file', pdfFile);
+            fd.append('questions', JSON.stringify(["Please summarize this document."]));
+            try {
+                const res = await fetch('/upload', { method: 'POST', body: fd });
+                if(res.ok) {
+                    const data = await res.json();
+                    summary = data.answers ? data.answers[0] : "";
+                    summaryPanel.textContent = summary || "No summary available.";
+                    pdfUploaded = true;
+                    chatHistory = [];
+                    renderChat();
+                    chatForm.style.display = '';
+                    statusBar.textContent = "PDF uploaded! Start chatting.";
+                    uploadBox.style.display = 'none';
+                    switchBtn.style.display = '';
+                    showTab('summary'); // Show summary tab first
+                    setTimeout(() => showTab('chat'), 1800); // Switch to chat after preview
+                } else {
+                    statusBar.textContent = "Upload failed: " + res.statusText;
+                }
+            } catch(e) {
+                statusBar.textContent = "Upload error: " + (e.message || e);
+            } finally {
+                uploadBtn.disabled = false;
+                uploadBtn.textContent = "Upload";
+            }
+        };
+
+        // Switch/upload new PDF
+        switchBtn.onclick = function() {
+            pdfUploaded = false;
+            chatHistory = [];
+            summary = "";
+            pdfFile = null;
+            uploadBox.style.display = '';
+            switchBtn.style.display = 'none';
+            summaryPanel.textContent = '';
+            chatPanel.innerHTML = '';
+            chatInput.value = '';
+            chatForm.style.display = 'none';
+            statusBar.textContent = '';
+            showTab('chat');
+        };
+
+        // Chat logic
+        chatForm.onsubmit = async function(e) {
+            e.preventDefault();
+            const question = chatInput.value.trim();
+            if(!question) return;
+            chatInput.value = "";
+            addToChat('user', question);
+            botTyping = true;
+            renderChat();
+            statusBar.textContent = "";
+            // Send to backend
+            const fd = new FormData();
+            fd.append('file', pdfFile);
+            fd.append('questions', JSON.stringify([question]));
+            try {
+                await delay(500); // Show typing indicator
+                const res = await fetch('/upload', { method: 'POST', body: fd });
+                if(res.ok) {
+                    const data = await res.json();
+                    const answer = data.answers ? data.answers[0] : "No answer.";
+                    botTyping = false;
+                    addToChat('bot', answer);
+                    renderChat();
+                } else {
+                    botTyping = false;
+                    addToChat('bot', "Error: " + res.statusText);
+                    renderChat();
+                }
+            } catch(e) {
+                botTyping = false;
+                addToChat('bot', "Error: " + (e.message || e));
+                renderChat();
+            }
+        };
+
+        function addToChat(sender, text) {
+            chatHistory.push({sender, text});
+        }
+        function renderChat() {
+            chatPanel.innerHTML = '';
+            chatHistory.forEach(({sender, text}) => {
+                const row = document.createElement('div');
+                row.className = 'bubble-row';
+                // Avatar
+                const avatar = document.createElement('div');
+                avatar.className = 'avatar ' + sender;
+                avatar.textContent = sender === 'user' ? '🧑' : '🤖';
+                if(sender === 'user') row.appendChild(avatar);
+                // Bubble
+                const bubble = document.createElement('div');
+                bubble.className = 'bubble ' + sender;
+                bubble.textContent = text;
+                row.appendChild(bubble);
+                if(sender === 'bot') row.appendChild(avatar);
+                chatPanel.appendChild(row);
+            });
+            if(botTyping) {
+                const row = document.createElement('div');
+                row.className = 'bubble-row';
+                const avatar = document.createElement('div');
+                avatar.className = 'avatar bot';
+                avatar.textContent = '🤖';
+                row.appendChild(avatar);
+                const bubble = document.createElement('div');
+                bubble.className = 'bubble bot';
+                bubble.innerHTML = '<span class="typing-indicator">Bot is typing <span class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span></span>';
+                row.appendChild(bubble);
+                chatPanel.appendChild(row);
+            }
+            if(scrollTimeout) clearTimeout(scrollTimeout);
+            scrollTimeout = setTimeout(() => {
+                chatPanel.scrollTop = chatPanel.scrollHeight;
+            }, 90);
+        }
+
+        // Autoresize textarea
+        chatInput.addEventListener('input', function() {
+            chatInput.style.height = 'auto';
+            chatInput.style.height = Math.max(38, Math.min(chatInput.scrollHeight,90)) + 'px';
+        });
+
+        function delay(ms) { return new Promise(resolve=>setTimeout(resolve,ms)); }
+
+        // Initial
+        showTab('chat');
+    </script>
+</body>
+</html>

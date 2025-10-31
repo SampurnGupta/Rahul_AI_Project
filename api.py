@@ -20,9 +20,11 @@ from pydantic import BaseModel, Field, validator
 import uvicorn
 import time
 from datetime import datetime
-from advanced_pdf_bot import PDFChatbot, setup_logging
+from advanced_pdf_bot import PDFChatbot, setup_logging, genai_chat_completion, LLM_MODEL
 from cors_config import CORS_DEV, CORS_PROD, CORS_HACKRX, CORS_EXTERNAL_TESTING
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse
 
 import hashlib
 from urllib.parse import urlparse
@@ -63,7 +65,14 @@ def get_cors_config():
         return CORS_HACKRX
 
 cors_config = get_cors_config()
-app.add_middleware(CORSMiddleware, **cors_config)
+# app.add_middleware(CORSMiddleware, **cors_config)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Open for all; restrict if needed
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ---------------- Models ----------------
 class HackRxRequest(BaseModel):
@@ -348,6 +357,13 @@ def process_document_and_get_chatbot(document_source: Union[str, UploadFile], so
         )
 
 # ---------------- Startup / Health ----------------
+@app.api_route("/health", methods=["GET", "HEAD"], tags=["Health"])
+async def health_check():
+    return {
+        "status": "ok",
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
 @app.on_event("startup")
 async def startup_event():
     logger.info("🚀 Starting HackRx 6.0 PDF Chatbot API")
@@ -367,17 +383,12 @@ async def root():
         "stats": request_stats
     }
 
-@app.api_route("/health", methods=["GET", "HEAD"], tags=["Health"])
-async def health_check():
-    return {
-        "status": "ok",
-        "timestamp": datetime.utcnow().isoformat(),
-        "environment": os.getenv("ENVIRONMENT", "hackrx"),
-        "cached_documents": len(chatbots),
-        "llm_query_support": "enabled",
-    }
 
 # ---------------- Endpoints ----------------
+@app.get("/", response_class=FileResponse, tags=["Frontend"])
+async def root():
+    return FileResponse("static/index.html")
+
 @app.post(
     "/hackrx/run",
     response_model=HackRxResponse,
@@ -646,40 +657,23 @@ if __name__ == "__main__":
 # ---------------- LLM Fallback (always returns a non-placeholder answer) ----------------
 def query_llm_for_answer(question: str) -> str:
     """
-    Query the LLM to answer questions outside the document context.
-    If LLM or API fails, provide a best-effort generic informative answer.
+    Query Gemini (genai) 'gemini-2.5-flash' to answer questions outside the document context.
+    If LLM fails, return a best-effort informative message.
     """
     try:
-        logger.info(f"🔍 Querying LLM for question: {question}")
-        import requests
-        api_url = "https://api.openai.com/v1/completions"
-        api_key = os.getenv('OPENAI_API_KEY')
-        if not api_key:
-            logger.warning("⚠ OPENAI_API_KEY not set; returning fallback message")
-            return "The system is not configured to answer this question right now."
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": "text-davinci-003",
-            "prompt": question,
-            "max_tokens": 150,
-            "temperature": 0.7
-        }
-        response = requests.post(api_url, json=payload, headers=headers, timeout=40)
-        response.raise_for_status()
-        llm_response = response.json().get("choices", [{}])[0].get("text", "").strip()
-        if not llm_response or is_unusable_doc_answer(llm_response):
+        logger.info(f"🔍 Querying Gemini LLM for question: {question}")
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant that provides concise, informative answers."},
+            {"role": "user", "content": question}
+        ]
+        content = genai_chat_completion(messages=messages, model=LLM_MODEL, temperature=0.7, max_tokens=300)
+        if not content or is_unusable_doc_answer(content):
+            logger.warning("⚠ Gemini returned empty or unusable response; returning graceful fallback message")
             return ("No definitive answer was found in the document or from the AI model. "
                     "Please try rephrasing your question or provide more detail.")
-        logger.info(f"✅ LLM response: {llm_response[:120]}")
-        return llm_response
-    except requests.exceptions.RequestException as e:
-        logger.error(f"❌ Error querying LLM API: {e}")
+        logger.info(f"✅ LLM response: {content[:120]}")
+        return content
+    except Exception as e:
+        logger.error(f"❌ Error querying Gemini LLM: {e}")
         return ("No definitive answer was found due to a technical issue contacting the AI service. "
                 "Please try again later or rephrase your question.")
-    except Exception as e:
-        logger.error(f"❌ Unexpected error querying LLM: {e}")
-        return ("No answer could be generated due to an unexpected error. "
-                "Please try again with a different question.")

@@ -26,7 +26,9 @@ except Exception:
     DocxDocument = None  # Optional dependency
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain.schema import Document
-import openai
+import google.generativeai as genai
+import os
+# import openai
 from pinecone import Pinecone, ServerlessSpec
 from dotenv import load_dotenv
 from langgraph.graph import StateGraph, END
@@ -87,25 +89,82 @@ def setup_logging(log_level: str = "INFO"):
 # Load environment variables from .env file
 load_dotenv()
 
-# Configuration - fetch API keys from environment variables
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# Configuration - fetch Gemini API key from environment variables
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY not found in environment variables")
+
+genai.configure(api_key=GEMINI_API_KEY)
+gemini_model = genai.GenerativeModel("gemini-2.5-flash")
+
+PAGE_SUMMARY_TOP_K = int(os.getenv("PAGE_SUMMARY_TOP_K", "2"))
+CHUNK_TOP_K = int(os.getenv("CHUNK_TOP_K", "6"))
+CONTEXT_CHAR_BUDGET = int(os.getenv("CONTEXT_CHAR_BUDGET", "3000"))
+
+# OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 PINECONE_ENVIRONMENT = os.getenv("PINECONE_ENVIRONMENT", "gcp-starter")  # Default environment
 VECTOR_BACKEND = os.getenv("VECTOR_BACKEND", "pinecone").lower()  # pinecone|faiss (faiss stub)
 
 # Validate that all required environment variables are set
-if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY not found in environment variables")
+# if not OPENAI_API_KEY:
+#     raise ValueError("OPENAI_API_KEY not found in environment variables")
 if VECTOR_BACKEND == "pinecone" and not PINECONE_API_KEY:
     raise ValueError("PINECONE_API_KEY not found in environment variables for Pinecone backend")
 
 # Initialize clients
-openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
+# OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # not used; using Gemini (genai) for LLM
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+PINECONE_ENVIRONMENT = os.getenv("PINECONE_ENVIRONMENT", "gcp-starter")  # Default environment
+VECTOR_BACKEND = os.getenv("VECTOR_BACKEND", "pinecone").lower()  # pinecone|faiss (faiss stub)
+
+if VECTOR_BACKEND == "pinecone" and not PINECONE_API_KEY:
+    raise ValueError("PINECONE_API_KEY not found in environment variables for Pinecone backend")
+
+# Use Pinecone client as before (no change)
 pinecone_client = Pinecone(api_key=PINECONE_API_KEY) if VECTOR_BACKEND == "pinecone" else None
+
+# Helper wrappers to use Google Gemini (genai) for chat and embeddings in place of OpenAI
+def genai_chat_completion(messages: List[Dict[str, str]], model: str = LLM_MODEL, temperature: float = 0.0, max_tokens: int = 300) -> str:
+    """
+    Wrapper to call genai chat and return the assistant content string robustly.
+    """
+    try:
+        # Use chat.create when messages are provided
+        resp = genai.chat.create(model=model, messages=messages, temperature=temperature, max_output_tokens=max_tokens)
+        # Try common response shapes
+        if hasattr(resp, "candidates") and resp.candidates:
+            return getattr(resp.candidates[0], "content", str(resp.candidates[0]))
+        if isinstance(resp, dict) and "candidates" in resp and resp["candidates"]:
+            return resp["candidates"][0].get("content", "")
+        # Fallback to 'output' style
+        if hasattr(resp, "output") and resp.output:
+            first = resp.output[0]
+            return getattr(first, "content", str(first))
+        return str(resp)
+    except Exception as e:
+        raise
+
+def genai_embeddings_create(inputs: List[str], model: str = EMBEDDING_MODEL) -> List[List[float]]:
+    """
+    Wrapper to call genai embeddings.create and return list of embedding vectors.
+    """
+    try:
+        resp = genai.embeddings.create(model=model, input=inputs)
+        data = getattr(resp, "data", None) or resp.get("data", [])
+        embeddings = []
+        for item in data:
+            if isinstance(item, dict) and "embedding" in item:
+                embeddings.append(item["embedding"])
+            elif hasattr(item, "embedding"):
+                embeddings.append(item.embedding)
+        return embeddings
+    except Exception as e:
+        raise
 
 # Global constants
 EMBEDDING_MODEL = "text-embedding-3-small"
-LLM_MODEL = "gpt-4o-mini"
+LLM_MODEL = "gemini-2.5-flash"
 PINECONE_INDEX_NAME = "pdf-chatbot-index"
 EMBEDDING_DIMENSION = 1536  # Dimension for text-embedding-3-small
 
@@ -247,14 +306,7 @@ def get_text_chunks_by_page(pages_text: Dict[int, str]) -> Dict[int, List[str]]:
 
 def generate_summary(text: str, summary_type: str = "document") -> str:
     """
-    Generate a summary of the given text using OpenAI LLM.
-    
-    Args:
-        text (str): Text to summarize
-        summary_type (str): Type of summary ("document", "page", or "chunk")
-        
-    Returns:
-        str: Generated summary
+    Generate a summary of the given text using Gemini (genai) LLM.
     """
     try:
         if summary_type == "document":
@@ -266,7 +318,7 @@ def generate_summary(text: str, summary_type: str = "document") -> str:
 
 Document text:
 {text[:4000]}"""  # Limit to avoid token limits
-        
+            
         elif summary_type == "page":
             prompt = f"""Please provide a concise summary of this page content. Include:
 1. Main topics discussed
@@ -275,7 +327,7 @@ Document text:
 
 Page text:
 {text}"""
-        
+            
         else:  # chunk
             prompt = f"""Please provide a brief summary of this text chunk focusing on:
 1. Main topic
@@ -285,18 +337,14 @@ Page text:
 Text chunk:
 {text}"""
 
-        response = openai_client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=[
-                {"role": "system", "content": "You are a helpful AI assistant that creates concise, informative summaries."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,
-            max_tokens=500
-        )
-        
-        return response.choices[0].message.content
-        
+        messages = [
+            {"role": "system", "content": "You are a helpful AI assistant that creates concise, informative summaries."},
+            {"role": "user", "content": prompt}
+        ]
+
+        content = genai_chat_completion(messages=messages, model=LLM_MODEL, temperature=0.3, max_tokens=500)
+        return content
+
     except Exception as e:
         print(f"Error generating summary: {str(e)}")
         return f"Summary generation failed: {str(e)}"
@@ -413,12 +461,7 @@ def check_document_exists(index, doc_id: str) -> bool:
 def embed_and_upsert_with_summaries(index, pages_text: Dict[int, str], page_chunks: Dict[int, List[str]], doc_id: str):
     """
     Generate embeddings for text chunks and summaries, then upsert them into Pinecone index.
-
-    Args:
-        index: Pinecone index object
-        pages_text (Dict[int, str]): Dictionary with page numbers and their text
-        page_chunks (Dict[int, List[str]]): Dictionary with page numbers and their chunks
-        doc_id (str): Unique identifier for the document
+    Uses Gemini (genai) embeddings API via wrapper.
     """
     print("Generating embeddings and upserting with summaries...")
 
@@ -430,10 +473,7 @@ def embed_and_upsert_with_summaries(index, pages_text: Dict[int, str], page_chun
             doc_summary = generate_summary(full_text, "document")
             print("Generated document summary")
 
-            doc_summary_embedding = openai_client.embeddings.create(
-                input=[doc_summary],
-                model=EMBEDDING_MODEL,
-            ).data[0].embedding
+            doc_summary_embedding = genai_embeddings_create([doc_summary], model=EMBEDDING_MODEL)[0]
 
             index.upsert(
                 vectors=[
@@ -463,10 +503,7 @@ def embed_and_upsert_with_summaries(index, pages_text: Dict[int, str], page_chun
                 page_summaries[page_num] = page_summary
                 print(f"Generated summary for page {page_num}")
 
-                page_summary_embedding = openai_client.embeddings.create(
-                    input=[page_summary],
-                    model=EMBEDDING_MODEL,
-                ).data[0].embedding
+                page_summary_embedding = genai_embeddings_create([page_summary], model=EMBEDDING_MODEL)[0]
 
                 vectors_to_upsert.append(
                     {
@@ -483,15 +520,10 @@ def embed_and_upsert_with_summaries(index, pages_text: Dict[int, str], page_chun
 
             # Generate embeddings for chunks
             if chunks:
-                chunk_embeddings = openai_client.embeddings.create(
-                    input=chunks,
-                    model=EMBEDDING_MODEL,
-                )
+                chunk_embeddings = genai_embeddings_create(chunks, model=EMBEDDING_MODEL)
 
                 # Create vectors for each chunk
-                for chunk_idx, (chunk, embedding) in enumerate(
-                    zip(chunks, chunk_embeddings.data)
-                ):
+                for chunk_idx, (chunk, embedding) in enumerate(zip(chunks, chunk_embeddings)):
                     # Include previous page summary as context if available
                     prev_summary = page_summaries.get(page_num - 1, "") if page_num > 1 else ""
 
@@ -508,7 +540,7 @@ def embed_and_upsert_with_summaries(index, pages_text: Dict[int, str], page_chun
                     vectors_to_upsert.append(
                         {
                             "id": f"{doc_id}-page-{page_num}-chunk-{chunk_idx}",
-                            "values": embedding.embedding,
+                            "values": embedding,
                             "metadata": meta,
                         }
                     )
@@ -535,24 +567,14 @@ def embed_and_upsert_with_summaries(index, pages_text: Dict[int, str], page_chun
 def check_query_relevance(index, query: str, doc_id: str) -> tuple[bool, str]:
     """
     Check if the user query is relevant to the document by comparing with document summary.
-    
-    Args:
-        index: Pinecone index object
-        query (str): User's query
-        doc_id (str): Document ID
-        
-    Returns:
-        tuple[bool, str]: (is_relevant, document_summary)
+    Uses genai embeddings and chat for optional fallback decision.
     """
     try:
         # If document summaries are disabled, skip relevance filtering
         if not ENABLE_DOC_SUMMARY:
             return True, ""
         # Generate embedding for the query
-        query_embedding = openai_client.embeddings.create(
-            input=[query],
-            model=EMBEDDING_MODEL
-        ).data[0].embedding
+        query_embedding = genai_embeddings_create([query], model=EMBEDDING_MODEL)[0]
         
         # Search for document summary
         search_results = index.query(
@@ -589,17 +611,12 @@ def check_query_relevance(index, query: str, doc_id: str) -> tuple[bool, str]:
             Answer only 'YES' or 'NO' followed by a brief explanation.
             """
             
-            response = openai_client.chat.completions.create(
-                model=LLM_MODEL,
-                messages=[
-                    {"role": "system", "content": "You are a helpful assistant that determines query relevance."},
-                    {"role": "user", "content": relevance_prompt}
-                ],
-                temperature=0.1,
-                max_tokens=100
-            )
+            messages = [
+                {"role": "system", "content": "You are a helpful assistant that determines query relevance."},
+                {"role": "user", "content": relevance_prompt}
+            ]
             
-            answer = response.choices[0].message.content.strip().upper()
+            answer = genai_chat_completion(messages=messages, model=LLM_MODEL, temperature=0.1, max_tokens=100).strip().upper()
             is_relevant = answer.startswith('YES')
             
             return is_relevant, document_summary
@@ -612,22 +629,11 @@ def check_query_relevance(index, query: str, doc_id: str) -> tuple[bool, str]:
 def get_relevant_context_enhanced(index, query: str, doc_id: str, top_k: int = CHUNK_TOP_K) -> str:
     """
     Perform enhanced semantic search to get relevant context for the query.
-    
-    Args:
-        index: Pinecone index object
-        query (str): User's query
-        doc_id (str): Document ID
-        top_k (int): Number of top results to retrieve
-        
-    Returns:
-        str: Combined context from retrieved chunks
+    Uses genai embeddings for query vectorization.
     """
     try:
         # Generate embedding for the query
-        query_embedding = openai_client.embeddings.create(
-            input=[query],
-            model=EMBEDDING_MODEL
-        ).data[0].embedding
+        query_embedding = genai_embeddings_create([query], model=EMBEDDING_MODEL)[0]
         
         relevant_pages = []
         # First, search for relevant page summaries if enabled
@@ -724,14 +730,7 @@ def get_relevant_context_enhanced(index, query: str, doc_id: str, top_k: int = C
 
 def get_llm_answer(context: str, query: str) -> str:
     """
-    Generate a direct, concise answer using OpenAI LLM based on the provided context.
-    
-    Args:
-        context (str): Retrieved context from semantic search
-        query (str): User's original query
-        
-    Returns:
-        str: A direct string answer to the question.
+    Generate a direct, concise answer using Gemini (genai) LLM based on the provided context.
     """
     import logging
     logger = logging.getLogger(__name__)
@@ -750,19 +749,14 @@ Question: {query}
 Answer:"""
 
     try:
-        response = openai_client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=[
-                {"role": "system", "content": "You are a helpful AI assistant that provides direct answers based only on the provided context."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.0,  # Set to 0 for fact-based, deterministic answers
-            max_tokens=300  # Reduced max_tokens for concise answers
-        )
-        
-        answer = response.choices[0].message.content.strip()
+        messages = [
+            {"role": "system", "content": "You are a helpful AI assistant that provides direct answers based only on the provided context."},
+            {"role": "user", "content": prompt}
+        ]
+
+        content = genai_chat_completion(messages=messages, model=LLM_MODEL, temperature=0.0, max_tokens=300)
         logger.info(f"Generated answer for query: {query[:50]}...")
-        return answer
+        return content
 
     except Exception as e:
         logger.error(f"Error generating LLM response: {str(e)}")
@@ -797,8 +791,8 @@ def rank_clauses_by_similarity(clauses: List[Dict[str, Any]], query: str) -> Lis
         return []
     # Prepare inputs
     inputs = [query] + [c["snippet"] for c in clauses]
-    embs = openai_client.embeddings.create(input=inputs, model=EMBEDDING_MODEL).data
-    q = embs[0].embedding
+    embs = genai_embeddings_create(inputs, model=EMBEDDING_MODEL)
+    q = embs[0]
     def cosine(a, b):
         import math
         dot = sum(x*y for x, y in zip(a, b))
@@ -807,7 +801,7 @@ def rank_clauses_by_similarity(clauses: List[Dict[str, Any]], query: str) -> Lis
         return dot / (na*nb + 1e-8)
     scored: List[Tuple[Dict[str, Any], float]] = []
     for idx, c in enumerate(clauses, start=1):
-        s = cosine(q, embs[idx].embedding)
+        s = cosine(q, embs[idx])
         scored.append((c, float(s)))
     scored.sort(key=lambda t: t[1], reverse=True)
     return scored

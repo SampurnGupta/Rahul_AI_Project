@@ -21,7 +21,8 @@ langchain>=0.2.6
 langgraph==0.1.14
 
 # AI services
-openai==1.98.0
+google-generativeai>=0.3.0
+# openai==1.98.0
 pinecone-client==3.2.2
 
 # Dependencies (let pip resolve versions)
