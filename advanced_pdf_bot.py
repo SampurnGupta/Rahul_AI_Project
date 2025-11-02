@@ -184,57 +184,122 @@ def genai_chat_completion(messages: List[Dict[str, str]], model: str = LLM_MODEL
     
 def genai_embeddings_create(inputs: List[str], model: str = EMBEDDING_MODEL) -> List[List[float]]:
     """
-    Wrapper to call genai embeddings using the v0.8.x API surface (embedder) and return list of embedding vectors.
+    Robust wrapper to create embeddings with google.generativeai across multiple possible
+    library versions / API shapes.
+
+    Tries, in order:
+    1) genai.embeddings.create(model=..., input=...)
+    2) genai.embedder(model).embed_content(inputs) or .embed(inputs)
+    3) genai.embed(inputs) (older/alternate)
+    4) genai(model, inputs) or genai(inputs) as a last resort
+
+    Returns: List[List[float]] (one embedding per input)
     """
     try:
-        # Create an embedder for the requested model
-        emb = genai.embedder(model)
-
-        # Many embedder APIs expose embed_content or embed; try common names
-        if hasattr(emb, "embed_content"):
-            resp = emb.embed_content(inputs)
-        elif hasattr(emb, "embed"):
-            resp = emb.embed(inputs)
-        else:
-            # If embedder directly callable
-            resp = emb(inputs)
-
-        # Response shapes may vary: try structured object, dict with 'data', or raw list
         embeddings = []
+
+        # 1) Try genai.embeddings.create (some versions expose this)
+        if hasattr(genai, "embeddings") and hasattr(genai.embeddings, "create"):
+            resp = genai.embeddings.create(model=model, input=inputs)
+        else:
+            resp = None
+
+        # 2) If not available, try genai.embedder(model)
+        if resp is None and hasattr(genai, "embedder"):
+            try:
+                emb = genai.embedder(model)
+                if hasattr(emb, "embed_content"):
+                    resp = emb.embed_content(inputs)
+                elif hasattr(emb, "embed"):
+                    resp = emb.embed(inputs)
+                else:
+                    # maybe embedder is directly callable
+                    resp = emb(inputs)
+            except Exception:
+                resp = None
+
+        # 3) Try genai.embed (alternate)
+        if resp is None and hasattr(genai, "embed"):
+            try:
+                resp = genai.embed(inputs, model=model)
+            except TypeError:
+                # some shapes accept (inputs,) only
+                resp = genai.embed(inputs)
+
+        # 4) Last resort: try calling genai or genai(model,...)
+        if resp is None:
+            # don't raise yet; probe for callable genai
+            if callable(genai):
+                try:
+                    resp = genai(inputs)
+                except Exception:
+                    resp = None
+            # try genai(model, inputs)
+            if resp is None:
+                try:
+                    resp = getattr(genai, "__call__", lambda *a, **k: None)(model, inputs)
+                except Exception:
+                    resp = None
+
+        # If still nothing, raise a helpful error listing available attributes
+        if resp is None:
+            available = ", ".join(sorted([a for a in dir(genai) if not a.startswith("_")])[:200])
+            raise RuntimeError(
+                "No recognized embeddings entrypoint found on google.generativeai. "
+                f"Available attributes (truncated): {available}"
+            )
+
+        # Normalize response shapes
+        # Case A: object with .data attribute (list of items)
         if hasattr(resp, "data"):
             data = resp.data
-            # data may be sequence of objects or dicts
             for item in data:
                 if isinstance(item, dict) and "embedding" in item:
                     embeddings.append(item["embedding"])
                 elif hasattr(item, "embedding"):
                     embeddings.append(item.embedding)
-                else:
-                    # fallback: if item itself is a list of floats
-                    if isinstance(item, list):
-                        embeddings.append(item)
+                elif isinstance(item, list):
+                    embeddings.append(item)
+        # Case B: dict with 'data' key
         elif isinstance(resp, dict) and "data" in resp:
             for item in resp["data"]:
                 if isinstance(item, dict) and "embedding" in item:
                     embeddings.append(item["embedding"])
+                elif isinstance(item, list):
+                    embeddings.append(item)
+        # Case C: direct list-of-vectors (e.g., [[...], [...]])
         elif isinstance(resp, list) and resp and isinstance(resp[0], list):
-            # direct list of vectors
             return resp
+        # Case D: some embed endpoints return {'embedding': [...]} for single input
+        elif isinstance(resp, dict) and "embedding" in resp and isinstance(resp["embedding"], list):
+            embeddings.append(resp["embedding"])
         else:
-            # last resort: try to find embedding fields anywhere
+            # Try to iterate and find any 'embedding' entries
             try:
                 for item in resp:
                     if isinstance(item, dict) and "embedding" in item:
                         embeddings.append(item["embedding"])
+                    elif isinstance(item, list):
+                        embeddings.append(item)
             except Exception:
                 pass
 
+        # Final sanity: ensure we have embeddings for each input
+        if not embeddings:
+            raise RuntimeError(f"Failed to extract embeddings from genai response: type={type(resp)}")
+
+        # If a single embedding returned but multiple inputs passed, repeat/raise accordingly.
+        if len(embeddings) == 1 and len(inputs) > 1:
+            # some APIs return a single embedding for concatenated input; that's usually wrong.
+            # raise to make the issue visible
+            raise RuntimeError("Received a single embedding for multiple inputs; aborting to avoid mismatch.")
+
         return embeddings
 
-    except Exception as e:
-        # propagate to caller for logging
+    except Exception:
+        # Let caller handle errors — keep stacktrace for logs
         raise
-
+    
 # Speed/Token optimization flags
 ENABLE_DOC_SUMMARY = os.getenv("ENABLE_DOC_SUMMARY", "true").lower() == "true"
 ENABLE_PAGE_SUMMARIES = os.getenv("ENABLE_PAGE_SUMMARIES", "false").lower() == "true"
