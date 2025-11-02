@@ -214,49 +214,72 @@ def genai_chat_completion(messages: List[Dict[str, str]], model: str = LLM_MODEL
 
 def genai_embeddings_create(inputs: List[str], model: str = EMBEDDING_MODEL) -> List[List[float]]:
     """
-    Robust embeddings wrapper that uses the top-level embed_content / embed_content_async entry points (present
-    in your runtime). Accepts a list of input strings and returns a list of embedding vectors.
+    Robust embeddings wrapper that safely calls the available embed_content/embed APIs
+    without causing argument duplication errors, and normalizes response shapes.
     """
     try:
-        # Prefer synchronous embed_content if available
         resp = None
+
+        # 1) Prefer top-level embed_content with keyword-only args (try common kw names)
         if hasattr(genai, "embed_content"):
-            # Many versions accept signature: embed_content(model=model, text=...) or embed_content(model=model, input=...)
+            # Try a series of keyword-only calls; don't mix positional and keyword for the same arg.
+            tried = []
+            # a) model=model, input=inputs
             try:
-                # Try passing the list as 'input'
                 resp = genai.embed_content(model=model, input=inputs)
-            except TypeError:
-                # Some variants accept 'text' or positional args
+            except TypeError as e:
+                tried.append(("embed_content(model=model, input=inputs)", str(e)))
+                # b) model=model, text=inputs
                 try:
                     resp = genai.embed_content(model=model, text=inputs)
-                except Exception:
-                    # Try positional
-                    resp = genai.embed_content(inputs, model=model)
-        elif hasattr(genai, "embed_content_async"):
-            # Fallback to async variant but call it synchronously via asyncio (rare)
+                except TypeError as e2:
+                    tried.append(("embed_content(model=model, text=inputs)", str(e2)))
+                    # c) only positional: embed_content(inputs)
+                    try:
+                        resp = genai.embed_content(inputs)
+                    except TypeError as e3:
+                        tried.append(("embed_content(inputs)", str(e3)))
+                        # d) positional with model as second arg (avoid keyword duplication)
+                        try:
+                            resp = genai.embed_content(inputs, model)
+                        except Exception as e4:
+                            tried.append(("embed_content(inputs, model)", str(e4)))
+                            resp = None
+        # 2) async variant
+        if resp is None and hasattr(genai, "embed_content_async"):
             import asyncio
-            resp = asyncio.get_event_loop().run_until_complete(genai.embed_content_async(model=model, input=inputs))
-        elif hasattr(genai, "embed"):
-            # older alt
+            try:
+                resp = asyncio.get_event_loop().run_until_complete(genai.embed_content_async(model=model, input=inputs))
+            except TypeError:
+                try:
+                    resp = asyncio.get_event_loop().run_until_complete(genai.embed_content_async(model=model, text=inputs))
+                except Exception:
+                    resp = None
+
+        # 3) older embed entrypoint
+        if resp is None and hasattr(genai, "embed"):
             try:
                 resp = genai.embed(inputs, model=model)
             except TypeError:
-                resp = genai.embed(inputs)
-        else:
-            # If none of the recognized entry points exist, list available attributes to aid debugging
+                try:
+                    resp = genai.embed(inputs)
+                except Exception:
+                    resp = None
+
+        # 4) nothing found => helpful error
+        if resp is None:
             available = ", ".join(sorted([a for a in dir(genai) if not a.startswith("_")])[:200])
             raise RuntimeError(
-                "No recognized embeddings entrypoint found on google.generativeai. "
+                "No recognized embeddings entrypoint found on google.generativeai or all attempts failed. "
                 f"Available attributes (truncated): {available}"
             )
 
-        # Normalize response shapes to list[list[float]]
+        # Normalize common response shapes to List[List[float]]
         embeddings: List[List[float]] = []
 
-        # Case: object with .data attribute
+        # Case A: object with .data attribute
         if hasattr(resp, "data"):
             data = resp.data
-            # data is often a list of dict/object with 'embedding'
             for item in data:
                 if isinstance(item, dict) and "embedding" in item:
                     embeddings.append(item["embedding"])
@@ -264,21 +287,21 @@ def genai_embeddings_create(inputs: List[str], model: str = EMBEDDING_MODEL) -> 
                     embeddings.append(item.embedding)
                 elif isinstance(item, list):
                     embeddings.append(item)
-        # Case: dict with 'data'
+        # Case B: dict with 'data'
         elif isinstance(resp, dict) and "data" in resp:
             for item in resp["data"]:
                 if isinstance(item, dict) and "embedding" in item:
                     embeddings.append(item["embedding"])
                 elif isinstance(item, list):
                     embeddings.append(item)
-        # Case: direct list-of-vectors
+        # Case C: direct list-of-vectors
         elif isinstance(resp, list) and resp and isinstance(resp[0], list):
             return resp
-        # Case: single embedding dict
+        # Case D: single embedding dict
         elif isinstance(resp, dict) and "embedding" in resp and isinstance(resp["embedding"], list):
             embeddings.append(resp["embedding"])
         else:
-            # Try to iterate generic iterable and look for embedding fields
+            # Generic attempt to iterate and find embeddings
             try:
                 for item in resp:
                     if isinstance(item, dict) and "embedding" in item:
@@ -291,14 +314,13 @@ def genai_embeddings_create(inputs: List[str], model: str = EMBEDDING_MODEL) -> 
         if not embeddings:
             raise RuntimeError(f"Failed to extract embeddings from genai response; response type={type(resp)}")
 
-        # If user requested multiple inputs but we got only one embedding, surface an error
         if len(inputs) > 1 and len(embeddings) == 1:
             raise RuntimeError("Received a single embedding for multiple inputs; aborting to avoid mismatched lengths.")
 
         return embeddings
 
     except Exception:
-        # propagate for logging upstream
+        # propagate to caller so the stacktrace is logged upstream
         raise
 
 # Speed/Token optimization flags
