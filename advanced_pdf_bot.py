@@ -132,127 +132,131 @@ pinecone_client = Pinecone(api_key=PINECONE_API_KEY) if VECTOR_BACKEND == "pinec
 # Helper wrappers to use Google Gemini (genai) for chat and embeddings in place of OpenAI
 def genai_chat_completion(messages: List[Dict[str, str]], model: str = LLM_MODEL, temperature: float = 0.0, max_tokens: int = 300) -> str:
     """
-    Wrapper to call genai chat using the v0.8.x API surface and return the assistant content string.
-    Uses GenerativeModel and start_chat to send messages. Attempts multiple common response shapes.
+    Wrapper that adapts the project's simple messages format to the google.generativeai
+    Content/Part shape expected by the installed library, then calls the GenerativeModel chat flow.
+    Returns the assistant text content string.
     """
     try:
-        # Create/obtain a generative model instance for the chosen model name
-        gm = genai.GenerativeModel(model)
-
-        # Start a chat. The start_chat API may accept an initial history; we pass messages as history.
-        # Convert messages to the minimal expected shape if necessary.
-        history = []
+        # Normalize messages into the Content/Part structure the library expects.
+        # Each message will be converted into an object with 'author' and 'content': {'parts': [{'type': 'text', 'text': ...}]}
+        normalized_history = []
         for m in messages:
             role = m.get("role", "user")
-            content = m.get("content", "")
-            history.append({"author": role, "content": content})
+            content_text = m.get("content", "")
+            # Map roles to authors expected by the library
+            author = "system" if role == "system" else ("assistant" if role == "assistant" else "user")
+            content_obj = {"parts": [{"type": "text", "text": content_text}]}
+            normalized_history.append({"author": author, "content": content_obj})
 
-        chat = gm.start_chat(history=history)
+        # Create a GenerativeModel instance and start a chat with the normalized history.
+        gm = genai.GenerativeModel(model)
+        chat = gm.start_chat(history=normalized_history)
 
-        # Send a message to the chat without closing the chat so we can get a response object.
-        # Use the last user message as the prompt if messages already contained system + user pairs.
-        last_user = next((m for m in reversed(messages) if m.get("role") in ("user", "assistant", "system")), messages[-1])
+        # Send the latest user content (or the last message) to get a response
+        last_user = None
+        for m in reversed(messages):
+            if m.get("role") in ("user", "assistant", "system"):
+                last_user = m
+                break
+        if last_user is None:
+            last_user = messages[-1] if messages else {"content": ""}
+
         user_text = last_user.get("content", "")
 
-        # send_message returns a response-like object; adapt to multiple shapes
+        # Call send_message with explicit params
         resp = chat.send_message(user_text, temperature=temperature, max_output_tokens=max_tokens)
 
-        # Try to extract content from known shapes
-        # Common shape: resp.candidates[0].content
+        # Extract text from a few common response shapes
+        # 1) resp.candidates[0].content
         if hasattr(resp, "candidates") and resp.candidates:
             first = resp.candidates[0]
+            # candidate may be object or dict
             content = getattr(first, "content", None) or (first.get("content") if isinstance(first, dict) else None)
             if content:
-                return content
+                # content may itself be structured; try to extract parts
+                if isinstance(content, dict) and "parts" in content and isinstance(content["parts"], list):
+                    # Join text parts if present
+                    parts_text = []
+                    for p in content["parts"]:
+                        if isinstance(p, dict):
+                            # try common keys
+                            text = p.get("text") or p.get("content") or p.get("payload")
+                            if text:
+                                parts_text.append(str(text))
+                    if parts_text:
+                        return "\n".join(parts_text)
+                return str(content)
 
-        # Alternative: resp.output is a list of objects/strings
+        # 2) resp.output style
         if hasattr(resp, "output") and resp.output:
             first = resp.output[0]
-            return getattr(first, "content", None) or (first if isinstance(first, str) else str(first))
+            # If first has content.parts
+            if isinstance(first, dict) and "content" in first and isinstance(first["content"], dict):
+                parts = first["content"].get("parts", [])
+                return " ".join([p.get("text", "") if isinstance(p, dict) else str(p) for p in parts]).strip()
+            return str(first)
 
-        # Fallback: resp.text / str(resp)
+        # 3) resp.text or str(resp)
         if hasattr(resp, "text"):
             return resp.text
         if isinstance(resp, dict) and "candidates" in resp and resp["candidates"]:
             candidate = resp["candidates"][0]
-            return candidate.get("content", str(candidate))
+            if isinstance(candidate, dict):
+                c = candidate.get("content")
+                if isinstance(c, dict) and "parts" in c:
+                    return " ".join([p.get("text", "") for p in c["parts"] if isinstance(p, dict)])
+                return str(c)
         return str(resp)
 
-    except Exception as e:
-        # Bubble up the exception to be handled by the caller/logs
+    except Exception:
+        # Let caller handle and log the full exception, but re-raise so logs show detailed trace
         raise
-    
+
 def genai_embeddings_create(inputs: List[str], model: str = EMBEDDING_MODEL) -> List[List[float]]:
     """
-    Robust wrapper to create embeddings with google.generativeai across multiple possible
-    library versions / API shapes.
-
-    Tries, in order:
-    1) genai.embeddings.create(model=..., input=...)
-    2) genai.embedder(model).embed_content(inputs) or .embed(inputs)
-    3) genai.embed(inputs) (older/alternate)
-    4) genai(model, inputs) or genai(inputs) as a last resort
-
-    Returns: List[List[float]] (one embedding per input)
+    Robust embeddings wrapper that uses the top-level embed_content / embed_content_async entry points (present
+    in your runtime). Accepts a list of input strings and returns a list of embedding vectors.
     """
     try:
-        embeddings = []
-
-        # 1) Try genai.embeddings.create (some versions expose this)
-        if hasattr(genai, "embeddings") and hasattr(genai.embeddings, "create"):
-            resp = genai.embeddings.create(model=model, input=inputs)
-        else:
-            resp = None
-
-        # 2) If not available, try genai.embedder(model)
-        if resp is None and hasattr(genai, "embedder"):
+        # Prefer synchronous embed_content if available
+        resp = None
+        if hasattr(genai, "embed_content"):
+            # Many versions accept signature: embed_content(model=model, text=...) or embed_content(model=model, input=...)
             try:
-                emb = genai.embedder(model)
-                if hasattr(emb, "embed_content"):
-                    resp = emb.embed_content(inputs)
-                elif hasattr(emb, "embed"):
-                    resp = emb.embed(inputs)
-                else:
-                    # maybe embedder is directly callable
-                    resp = emb(inputs)
-            except Exception:
-                resp = None
-
-        # 3) Try genai.embed (alternate)
-        if resp is None and hasattr(genai, "embed"):
+                # Try passing the list as 'input'
+                resp = genai.embed_content(model=model, input=inputs)
+            except TypeError:
+                # Some variants accept 'text' or positional args
+                try:
+                    resp = genai.embed_content(model=model, text=inputs)
+                except Exception:
+                    # Try positional
+                    resp = genai.embed_content(inputs, model=model)
+        elif hasattr(genai, "embed_content_async"):
+            # Fallback to async variant but call it synchronously via asyncio (rare)
+            import asyncio
+            resp = asyncio.get_event_loop().run_until_complete(genai.embed_content_async(model=model, input=inputs))
+        elif hasattr(genai, "embed"):
+            # older alt
             try:
                 resp = genai.embed(inputs, model=model)
             except TypeError:
-                # some shapes accept (inputs,) only
                 resp = genai.embed(inputs)
-
-        # 4) Last resort: try calling genai or genai(model,...)
-        if resp is None:
-            # don't raise yet; probe for callable genai
-            if callable(genai):
-                try:
-                    resp = genai(inputs)
-                except Exception:
-                    resp = None
-            # try genai(model, inputs)
-            if resp is None:
-                try:
-                    resp = getattr(genai, "__call__", lambda *a, **k: None)(model, inputs)
-                except Exception:
-                    resp = None
-
-        # If still nothing, raise a helpful error listing available attributes
-        if resp is None:
+        else:
+            # If none of the recognized entry points exist, list available attributes to aid debugging
             available = ", ".join(sorted([a for a in dir(genai) if not a.startswith("_")])[:200])
             raise RuntimeError(
                 "No recognized embeddings entrypoint found on google.generativeai. "
                 f"Available attributes (truncated): {available}"
             )
 
-        # Normalize response shapes
-        # Case A: object with .data attribute (list of items)
+        # Normalize response shapes to list[list[float]]
+        embeddings: List[List[float]] = []
+
+        # Case: object with .data attribute
         if hasattr(resp, "data"):
             data = resp.data
+            # data is often a list of dict/object with 'embedding'
             for item in data:
                 if isinstance(item, dict) and "embedding" in item:
                     embeddings.append(item["embedding"])
@@ -260,21 +264,21 @@ def genai_embeddings_create(inputs: List[str], model: str = EMBEDDING_MODEL) -> 
                     embeddings.append(item.embedding)
                 elif isinstance(item, list):
                     embeddings.append(item)
-        # Case B: dict with 'data' key
+        # Case: dict with 'data'
         elif isinstance(resp, dict) and "data" in resp:
             for item in resp["data"]:
                 if isinstance(item, dict) and "embedding" in item:
                     embeddings.append(item["embedding"])
                 elif isinstance(item, list):
                     embeddings.append(item)
-        # Case C: direct list-of-vectors (e.g., [[...], [...]])
+        # Case: direct list-of-vectors
         elif isinstance(resp, list) and resp and isinstance(resp[0], list):
             return resp
-        # Case D: some embed endpoints return {'embedding': [...]} for single input
+        # Case: single embedding dict
         elif isinstance(resp, dict) and "embedding" in resp and isinstance(resp["embedding"], list):
             embeddings.append(resp["embedding"])
         else:
-            # Try to iterate and find any 'embedding' entries
+            # Try to iterate generic iterable and look for embedding fields
             try:
                 for item in resp:
                     if isinstance(item, dict) and "embedding" in item:
@@ -284,22 +288,19 @@ def genai_embeddings_create(inputs: List[str], model: str = EMBEDDING_MODEL) -> 
             except Exception:
                 pass
 
-        # Final sanity: ensure we have embeddings for each input
         if not embeddings:
-            raise RuntimeError(f"Failed to extract embeddings from genai response: type={type(resp)}")
+            raise RuntimeError(f"Failed to extract embeddings from genai response; response type={type(resp)}")
 
-        # If a single embedding returned but multiple inputs passed, repeat/raise accordingly.
-        if len(embeddings) == 1 and len(inputs) > 1:
-            # some APIs return a single embedding for concatenated input; that's usually wrong.
-            # raise to make the issue visible
-            raise RuntimeError("Received a single embedding for multiple inputs; aborting to avoid mismatch.")
+        # If user requested multiple inputs but we got only one embedding, surface an error
+        if len(inputs) > 1 and len(embeddings) == 1:
+            raise RuntimeError("Received a single embedding for multiple inputs; aborting to avoid mismatched lengths.")
 
         return embeddings
 
     except Exception:
-        # Let caller handle errors — keep stacktrace for logs
+        # propagate for logging upstream
         raise
-    
+
 # Speed/Token optimization flags
 ENABLE_DOC_SUMMARY = os.getenv("ENABLE_DOC_SUMMARY", "true").lower() == "true"
 ENABLE_PAGE_SUMMARIES = os.getenv("ENABLE_PAGE_SUMMARIES", "false").lower() == "true"
