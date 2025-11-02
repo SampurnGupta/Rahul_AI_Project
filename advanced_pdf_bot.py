@@ -132,41 +132,108 @@ pinecone_client = Pinecone(api_key=PINECONE_API_KEY) if VECTOR_BACKEND == "pinec
 # Helper wrappers to use Google Gemini (genai) for chat and embeddings in place of OpenAI
 def genai_chat_completion(messages: List[Dict[str, str]], model: str = LLM_MODEL, temperature: float = 0.0, max_tokens: int = 300) -> str:
     """
-    Wrapper to call genai chat and return the assistant content string robustly.
+    Wrapper to call genai chat using the v0.8.x API surface and return the assistant content string.
+    Uses GenerativeModel and start_chat to send messages. Attempts multiple common response shapes.
     """
     try:
-        # Use chat.create when messages are provided
-        resp = genai.chat.create(model=model, messages=messages, temperature=temperature, max_output_tokens=max_tokens)
-        # Try common response shapes
+        # Create/obtain a generative model instance for the chosen model name
+        gm = genai.GenerativeModel(model)
+
+        # Start a chat. The start_chat API may accept an initial history; we pass messages as history.
+        # Convert messages to the minimal expected shape if necessary.
+        history = []
+        for m in messages:
+            role = m.get("role", "user")
+            content = m.get("content", "")
+            history.append({"author": role, "content": content})
+
+        chat = gm.start_chat(history=history)
+
+        # Send a message to the chat without closing the chat so we can get a response object.
+        # Use the last user message as the prompt if messages already contained system + user pairs.
+        last_user = next((m for m in reversed(messages) if m.get("role") in ("user", "assistant", "system")), messages[-1])
+        user_text = last_user.get("content", "")
+
+        # send_message returns a response-like object; adapt to multiple shapes
+        resp = chat.send_message(user_text, temperature=temperature, max_output_tokens=max_tokens)
+
+        # Try to extract content from known shapes
+        # Common shape: resp.candidates[0].content
         if hasattr(resp, "candidates") and resp.candidates:
-            return getattr(resp.candidates[0], "content", str(resp.candidates[0]))
-        if isinstance(resp, dict) and "candidates" in resp and resp["candidates"]:
-            return resp["candidates"][0].get("content", "")
-        # Fallback to 'output' style
+            first = resp.candidates[0]
+            content = getattr(first, "content", None) or (first.get("content") if isinstance(first, dict) else None)
+            if content:
+                return content
+
+        # Alternative: resp.output is a list of objects/strings
         if hasattr(resp, "output") and resp.output:
             first = resp.output[0]
-            return getattr(first, "content", str(first))
-        return str(resp)
-    except Exception as e:
-        raise
+            return getattr(first, "content", None) or (first if isinstance(first, str) else str(first))
 
+        # Fallback: resp.text / str(resp)
+        if hasattr(resp, "text"):
+            return resp.text
+        if isinstance(resp, dict) and "candidates" in resp and resp["candidates"]:
+            candidate = resp["candidates"][0]
+            return candidate.get("content", str(candidate))
+        return str(resp)
+
+    except Exception as e:
+        # Bubble up the exception to be handled by the caller/logs
+        raise
+    
 def genai_embeddings_create(inputs: List[str], model: str = EMBEDDING_MODEL) -> List[List[float]]:
     """
-    Wrapper to call genai embeddings.create and return list of embedding vectors.
+    Wrapper to call genai embeddings using the v0.8.x API surface (embedder) and return list of embedding vectors.
     """
     try:
-        resp = genai.embeddings.create(model=model, input=inputs)
-        data = getattr(resp, "data", None) or resp.get("data", [])
-        embeddings = []
-        for item in data:
-            if isinstance(item, dict) and "embedding" in item:
-                embeddings.append(item["embedding"])
-            elif hasattr(item, "embedding"):
-                embeddings.append(item.embedding)
-        return embeddings
-    except Exception as e:
-        raise
+        # Create an embedder for the requested model
+        emb = genai.embedder(model)
 
+        # Many embedder APIs expose embed_content or embed; try common names
+        if hasattr(emb, "embed_content"):
+            resp = emb.embed_content(inputs)
+        elif hasattr(emb, "embed"):
+            resp = emb.embed(inputs)
+        else:
+            # If embedder directly callable
+            resp = emb(inputs)
+
+        # Response shapes may vary: try structured object, dict with 'data', or raw list
+        embeddings = []
+        if hasattr(resp, "data"):
+            data = resp.data
+            # data may be sequence of objects or dicts
+            for item in data:
+                if isinstance(item, dict) and "embedding" in item:
+                    embeddings.append(item["embedding"])
+                elif hasattr(item, "embedding"):
+                    embeddings.append(item.embedding)
+                else:
+                    # fallback: if item itself is a list of floats
+                    if isinstance(item, list):
+                        embeddings.append(item)
+        elif isinstance(resp, dict) and "data" in resp:
+            for item in resp["data"]:
+                if isinstance(item, dict) and "embedding" in item:
+                    embeddings.append(item["embedding"])
+        elif isinstance(resp, list) and resp and isinstance(resp[0], list):
+            # direct list of vectors
+            return resp
+        else:
+            # last resort: try to find embedding fields anywhere
+            try:
+                for item in resp:
+                    if isinstance(item, dict) and "embedding" in item:
+                        embeddings.append(item["embedding"])
+            except Exception:
+                pass
+
+        return embeddings
+
+    except Exception as e:
+        # propagate to caller for logging
+        raise
 
 # Speed/Token optimization flags
 ENABLE_DOC_SUMMARY = os.getenv("ENABLE_DOC_SUMMARY", "true").lower() == "true"
